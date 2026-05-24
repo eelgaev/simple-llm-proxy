@@ -1,0 +1,11 @@
+listen = "0.0.0.0:8080"
+api_tokens = ["sk-my-token-1", "sk-my-token-2"]
+
+[servers]
+# plain URLs (no backend token needed)
+"serverA-gpu01" = ["http://127.0.0.1:8081", "http://127.0.0.1:8082"]
+# mix of plain and token-authenticated backends
+"serverA-gpu23" = [
+  "http://127.0.0.1:8083",
+  { url = "http://127.0.0.1:8084", token = "sk-backend-secret" },
+]
