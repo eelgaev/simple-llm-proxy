@@ -96,7 +96,8 @@ pub async fn forward_request(
     client: &reqwest::Client,
     server: &ServerEntry,
     path: &str,
-    body: Bytes,
+    body: reqwest::Body,
+    content_length: Option<axum::http::HeaderValue>,
     permit: OwnedSemaphorePermit,
 ) -> Result<axum::response::Response, ProxyError> {
     let url = format!("{}{}", server.url().trim_end_matches('/'), path);
@@ -107,6 +108,12 @@ pub async fn forward_request(
         .post(&url)
         .header("content-type", "application/json")
         .body(body);
+
+    // Preserve the client's framing rather than re-chunking a body we are
+    // passing through unchanged.
+    if let Some(len) = content_length {
+        req = req.header(axum::http::header::CONTENT_LENGTH, len);
+    }
 
     if let Some(token) = server.token() {
         req = req.bearer_auth(token);

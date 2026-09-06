@@ -1,34 +1,90 @@
 use axum::extract::{Request, State};
 use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
+use bytes::{Bytes, BytesMut};
+use futures::StreamExt;
 use std::sync::Arc;
 
 use crate::error::ProxyError;
+use crate::model_scan::{ModelScanner, ScanError};
 use crate::proxy::{acquire_gpu_set_for_model, forward_get, forward_request, pick_server};
 use crate::state::AppState;
 
-const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+/// How much of the body we will hold while looking for the `"model"` key.
+/// Routing needs that key, so this much is unavoidably buffered; everything
+/// past it is relayed to the backend as it arrives. Matches the whole-body
+/// limit this handler used to enforce, so no request that routed before is
+/// rejected now -- and bodies larger than this stream through fine as long as
+/// `"model"` appears within it, which is where clients put it.
+const MAX_MODEL_SCAN_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
 
 pub async fn proxy_model_request(
     State(state): State<Arc<AppState>>,
     request: Request,
 ) -> Result<Response, ProxyError> {
     let path = request.uri().path().to_string();
-    let body = axum::body::to_bytes(request.into_body(), MAX_BODY_SIZE).await?;
+    // The body is relayed byte-for-byte, so the client's own framing still
+    // describes it; without this the request goes out chunked.
+    let content_length = request
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .cloned();
 
-    let parsed: serde_json::Value = serde_json::from_slice(&body)
-        .map_err(|e| ProxyError::BadRequest(format!("invalid JSON: {e}")))?;
+    let mut body = request.into_body().into_data_stream();
 
-    let model = parsed
-        .get("model")
-        .and_then(|m| m.as_str())
-        .ok_or_else(|| ProxyError::BadRequest("missing \"model\" field".into()))?;
+    // Read only as far as the top-level "model" key, which is what routing
+    // needs. The rest of the body never lands in proxy memory.
+    let mut scanner = ModelScanner::new();
+    let mut head = BytesMut::new();
+    let mut model = None;
 
-    let (gpu_set, permit) = acquire_gpu_set_for_model(&state, model).await?;
-    tracing::info!(gpu_set = %gpu_set.name, model = model, "acquired gpu set");
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk?;
+        head.extend_from_slice(&chunk);
+
+        match scanner.feed(&chunk) {
+            Ok(Some(found)) => {
+                model = Some(found);
+                break;
+            }
+            Ok(None) => {}
+            Err(ScanError::Absent) => {
+                return Err(ProxyError::BadRequest("missing \"model\" field".into()))
+            }
+            Err(ScanError::ModelNotString) => {
+                return Err(ProxyError::BadRequest("\"model\" must be a string".into()))
+            }
+            Err(ScanError::Malformed) => {
+                return Err(ProxyError::BadRequest("invalid JSON request body".into()))
+            }
+        }
+
+        if head.len() > MAX_MODEL_SCAN_BYTES {
+            return Err(ProxyError::BadRequest(format!(
+                "no \"model\" field in the first {MAX_MODEL_SCAN_BYTES} bytes of the body"
+            )));
+        }
+    }
+
+    let model = model.ok_or_else(|| ProxyError::BadRequest("missing \"model\" field".into()))?;
+
+    let (gpu_set, permit) = acquire_gpu_set_for_model(&state, &model).await?;
+    tracing::info!(gpu_set = %gpu_set.name, model = %model, "acquired gpu set");
+
+    // What we buffered, then the client's stream picked up where it left off.
+    let head = head.freeze();
+    let outgoing = futures::stream::once(async move { Ok::<Bytes, axum::Error>(head) }).chain(body);
 
     let server = pick_server(&gpu_set);
-    forward_request(&state.http_client, server, &path, body, permit).await
+    forward_request(
+        &state.http_client,
+        server,
+        &path,
+        reqwest::Body::wrap_stream(outgoing),
+        content_length,
+        permit,
+    )
+    .await
 }
 
 pub async fn list_models(

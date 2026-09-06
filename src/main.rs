@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod error;
+mod model_scan;
 mod proxy;
 mod routes;
 mod state;
