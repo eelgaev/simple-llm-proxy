@@ -59,6 +59,38 @@ pub fn pick_server(gpu_set: &GpuSet) -> &ServerEntry {
     &gpu_set.servers[idx % gpu_set.servers.len()]
 }
 
+pub async fn forward_get(
+    client: &reqwest::Client,
+    server: &ServerEntry,
+    path_and_query: &str,
+) -> Result<axum::response::Response, ProxyError> {
+    let url = format!("{}{}", server.url().trim_end_matches('/'), path_and_query);
+
+    tracing::info!("forwarding to {url}");
+
+    let mut req = client.get(&url);
+    if let Some(token) = server.token() {
+        req = req.bearer_auth(token);
+    }
+
+    let backend_resp = req.send().await?;
+
+    let status = backend_resp.status();
+    let mut builder = axum::http::Response::builder().status(status.as_u16());
+
+    for (key, value) in backend_resp.headers() {
+        if key != "transfer-encoding" {
+            builder = builder.header(key, value);
+        }
+    }
+
+    let bytes = backend_resp.bytes().await?;
+
+    builder
+        .body(axum::body::Body::from(bytes))
+        .map_err(|e| ProxyError::Internal(format!("failed to build response: {e}")))
+}
+
 pub async fn forward_request(
     client: &reqwest::Client,
     server: &ServerEntry,

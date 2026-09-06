@@ -49,6 +49,10 @@ async fn main() {
         .route("/v1/messages", post(routes::proxy_model_request))
         .route("/v1/messages/count_tokens", post(routes::proxy_model_request))
         .route("/v1/models", get(routes::list_models))
+        // llama.cpp-only compatibility routes (e.g. for pi-llama-cpp); not part
+        // of the OpenAI-style surface and unused by vLLM/sglang clients.
+        .route("/health", get(routes::health))
+        .route("/props", get(routes::get_props))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::auth_middleware,

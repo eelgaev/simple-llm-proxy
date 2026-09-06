@@ -54,6 +54,15 @@ If no config path is given, it defaults to `config.toml` in the current director
 - `POST /v1/messages` — proxied to a backend (llama.cpp's Anthropic Messages API)
 - `POST /v1/messages/count_tokens` — proxied to a backend (llama.cpp only)
 - `GET /v1/models` — aggregates models from all backends
+- `GET /health` — liveness check (always `{"status":"ok"}` if the proxy process is up)
+- `GET /props` — mirrors llama.cpp's `/props`; proxied to a backend so clients (e.g. pi-llama-cpp)
+  can detect server mode and, with `?model=<id>`, per-model status/capabilities. An unknown model
+  returns llama.cpp's own "model is not loaded" shape rather than a bare 404.
+
+`/health` and `/props` are intentionally at the root, not under `/v1` — that's where llama.cpp
+serves them, and clients that speak the llama.cpp API (like pi-llama-cpp) expect them there too.
+Point such clients at the proxy's root URL (e.g. `https://llm.example.com`, not
+`https://llm.example.com/v1`) — they append `/v1/...` themselves where needed.
 
 Every proxied POST endpoint routes purely on the `"model"` field in the JSON body — any backend
 that speaks that shape works, including llama.cpp, sglang, and vLLM. Endpoints a given backend
