@@ -13,18 +13,22 @@ A lightweight Rust reverse proxy for OpenAI-compatible LLM backends (llama.cpp, 
 
 Create a `config.toml`:
 
-```toml
-listen = "0.0.0.0:8080"
+```ini
+listen = "0.0.0.0:8000"
 api_tokens = ["sk-my-token-1", "sk-my-token-2"]
 
 [servers]
-"serverA-gpu01" = ["http://127.0.0.1:8081", "http://127.0.0.1:8082"]
-"serverA-gpu23" = ["http://127.0.0.1:8083"]
+"shared-gpu-set" = [
+  "https://backend-a.example.com",
+  "https://backend-b.example.com",
+]
+"llama-backend" = [{ url = "https://llm.example.com", token = "<redacted>" }] # llama.cpp
+"vllm-backend" = [{ url = "https://llm2.example.com", token = "<redacted>" }] # vLLM
 ```
 
 - **listen** — address and port the proxy binds to
 - **api_tokens** — list of Bearer tokens clients must use to authenticate
-- **servers** — GPU sets mapping. Each key is a GPU set name, each value is a list of backend URLs. Servers within the same GPU set share GPU resources, so only one request is processed at a time per set. Different GPU sets run in parallel.
+- **servers** — GPU sets mapping. Each key is a GPU set name, each value is a list of backend URLs or `{ url, token }` objects for backends that require their own bearer token. Servers within the same GPU set share GPU resources, so only one request is processed at a time per set. Different GPU sets run in parallel.
 
 ## Usage
 
