@@ -86,3 +86,9 @@ Set the `RUST_LOG` environment variable to control log verbosity:
 RUST_LOG=info cargo run -- config.toml
 RUST_LOG=debug cargo run -- config.toml
 ```
+
+## Examples
+
+An nginx TLS vhost and an opencode plugin that auto-lists every model behind the
+proxy: [examples/README.md](examples/README.md).
+
