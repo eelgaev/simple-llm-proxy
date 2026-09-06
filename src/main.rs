@@ -42,8 +42,12 @@ async fn main() {
     });
 
     let app = Router::new()
-        .route("/v1/chat/completions", post(routes::proxy_completions))
-        .route("/v1/completions", post(routes::proxy_completions))
+        .route("/v1/chat/completions", post(routes::proxy_model_request))
+        .route("/v1/completions", post(routes::proxy_model_request))
+        .route("/v1/embeddings", post(routes::proxy_model_request))
+        .route("/v1/rerank", post(routes::proxy_model_request))
+        .route("/v1/messages", post(routes::proxy_model_request))
+        .route("/v1/messages/count_tokens", post(routes::proxy_model_request))
         .route("/v1/models", get(routes::list_models))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

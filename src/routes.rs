@@ -8,7 +8,7 @@ use crate::state::AppState;
 
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 
-pub async fn proxy_completions(
+pub async fn proxy_model_request(
     State(state): State<Arc<AppState>>,
     request: Request,
 ) -> Result<Response, ProxyError> {
