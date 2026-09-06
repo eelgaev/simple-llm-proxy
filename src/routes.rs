@@ -41,21 +41,30 @@ pub async fn list_models(
     .await;
 
     let model_map = state.model_map.load();
-    let model_ids: Vec<serde_json::Value> = model_map
-        .keys()
-        .map(|id| {
-            serde_json::json!({
-                "id": id,
-                "object": "model",
-                "owned_by": "system",
-            })
-        })
+    // Each model object is served exactly as its backend reported it, so
+    // backend-specific metadata (llama.cpp's `meta.n_ctx`, vLLM/sglang's
+    // `max_model_len`, ...) reaches clients unchanged.
+    let models: Vec<serde_json::Value> = model_map
+        .values()
+        .map(|entry| entry.info.clone())
         .collect();
 
-    axum::Json(serde_json::json!({
+    let mut body = serde_json::json!({
         "object": "list",
-        "data": model_ids,
-    }))
+        "data": models,
+    });
+
+    // llama.cpp also lists models under a top-level `models` key; mirror it when
+    // any backend provided one, and omit it entirely when none did.
+    let listings: Vec<serde_json::Value> = model_map
+        .values()
+        .filter_map(|entry| entry.listing.clone())
+        .collect();
+    if !listings.is_empty() {
+        body["models"] = serde_json::Value::Array(listings);
+    }
+
+    axum::Json(body)
 }
 
 // The two handlers below exist solely for llama.cpp-flavored clients (e.g.
@@ -92,7 +101,7 @@ pub async fn get_props(
         Some(model) => {
             let map = state.model_map.load();
             match map.get(model) {
-                Some(gpu_sets) => Arc::clone(&gpu_sets[0]),
+                Some(entry) => Arc::clone(&entry.gpu_sets[0]),
                 None => {
                     // Matches llama.cpp's own shape for an unknown/unloaded model,
                     // which pi-llama-cpp maps to its "unloaded" status.

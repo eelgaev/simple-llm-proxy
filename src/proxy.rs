@@ -32,11 +32,12 @@ pub async fn acquire_gpu_set_for_model(
     model: &str,
 ) -> Result<(Arc<GpuSet>, OwnedSemaphorePermit), ProxyError> {
     let map = state.model_map.load();
-    let gpu_sets = map.get(model).ok_or_else(|| {
+    let entry = map.get(model).ok_or_else(|| {
         ProxyError::BadRequest(format!("model not found: {model}"))
     })?;
 
-    let futures: Vec<_> = gpu_sets
+    let futures: Vec<_> = entry
+        .gpu_sets
         .iter()
         .map(|gs| {
             let gs = Arc::clone(gs);
