@@ -43,14 +43,50 @@ impl Config {
         if self.api_tokens.is_empty() {
             return Err("at least one api_token is required".into());
         }
-        if self.servers.is_empty() {
-            return Err("at least one server group is required".into());
-        }
         for (name, entries) in &self.servers {
             if entries.is_empty() {
                 return Err(format!("server group '{}' has no URLs", name).into());
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_servers_table_is_valid() {
+        let config: Config = toml::from_str(
+            r#"
+                listen = "127.0.0.1:8080"
+                api_tokens = ["secret"]
+
+                [servers]
+            "#,
+        )
+        .unwrap();
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn configured_server_group_must_not_be_empty() {
+        let config: Config = toml::from_str(
+            r#"
+                listen = "127.0.0.1:8080"
+                api_tokens = ["secret"]
+
+                [servers]
+                local = []
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.validate().unwrap_err().to_string(),
+            "server group 'local' has no URLs"
+        );
     }
 }
