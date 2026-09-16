@@ -1,4 +1,4 @@
-use axum::extract::{Request, State};
+use axum::extract::{Json, Request, State};
 use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use bytes::{Bytes, BytesMut};
@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::error::ProxyError;
 use crate::model_scan::{ModelScanner, ScanError};
 use crate::proxy::{acquire_gpu_set_for_model, forward_get, forward_request, pick_server};
-use crate::state::AppState;
+use crate::state::{AppState, DiscoveredHost};
 
 /// How much of the body we will hold while looking for the `"model"` key.
 /// Routing needs that key, so this much is unavoidably buffered; everything
@@ -17,6 +17,124 @@ use crate::state::AppState;
 /// rejected now -- and bodies larger than this stream through fine as long as
 /// `"model"` appears within it, which is where clients put it.
 const MAX_MODEL_SCAN_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
+
+pub async fn register(
+    State(state): State<Arc<AppState>>,
+    Json(host): Json<DiscoveredHost>,
+) -> Result<impl IntoResponse, ProxyError> {
+    let mut selected = None;
+    let mut last_error = String::new();
+
+    for scheme in ["https", "http"] {
+        let base_url = format!("{scheme}://{}:{}", format_host(host.host), host.port);
+        match inspect_llama_server(&state.http_client, &base_url, &host.api_key).await {
+            Ok(model_count) => {
+                selected = Some((base_url, model_count));
+                break;
+            }
+            Err(error) => last_error = format!("{scheme}: {error}"),
+        }
+    }
+
+    let (base_url, model_count) = selected.ok_or_else(|| {
+        ProxyError::BackendUnavailable(format!(
+            "could not register {}:{} ({last_error})",
+            host.host, host.port
+        ))
+    })?;
+
+    state
+        .add_discovered_host(host, base_url.clone())
+        .await
+        .map_err(|e| ProxyError::Internal(format!("failed to save discovered host: {e}")))?;
+    state.discover_models().await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "status": "registered",
+            "url": base_url,
+            "models": model_count,
+        })),
+    ))
+}
+
+pub async fn restore_discovered_hosts(state: &Arc<AppState>) {
+    let hosts = match state.read_discovered_hosts().await {
+        Ok(hosts) => hosts,
+        Err(error) => {
+            tracing::warn!("failed to read discovered hosts: {error}");
+            return;
+        }
+    };
+
+    for host in hosts {
+        let mut restored = false;
+        for scheme in ["https", "http"] {
+            let base_url = format!("{scheme}://{}:{}", format_host(host.host), host.port);
+            if inspect_llama_server(&state.http_client, &base_url, &host.api_key)
+                .await
+                .is_ok()
+            {
+                if let Err(error) = state.add_discovered_host(host.clone(), base_url).await {
+                    tracing::warn!(host = %host.host, port = host.port, "failed to restore discovered host: {error}");
+                }
+                restored = true;
+                break;
+            }
+        }
+        if !restored {
+            tracing::warn!(host = %host.host, port = host.port, "saved discovered host is unreachable");
+        }
+    }
+}
+
+async fn inspect_llama_server(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+) -> Result<usize, String> {
+    let health = client
+        .get(format!("{base_url}/health"))
+        .bearer_auth(api_key)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !health.status().is_success() {
+        return Err(format!("GET /health returned {}", health.status()));
+    }
+    let health: serde_json::Value = health.json().await.map_err(|e| e.to_string())?;
+    if health.get("status").and_then(|value| value.as_str()) != Some("ok") {
+        return Err("GET /health did not return {\"status\":\"ok\"}".into());
+    }
+
+    let models = client
+        .get(format!("{base_url}/models"))
+        .bearer_auth(api_key)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !models.status().is_success() {
+        return Err(format!("GET /models returned {}", models.status()));
+    }
+    let models: serde_json::Value = models.json().await.map_err(|e| e.to_string())?;
+    let count = models
+        .get("data")
+        .or_else(|| models.get("models"))
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "GET /models response has neither data[] nor models[]".to_string())?
+        .len();
+    Ok(count)
+}
+
+fn format_host(host: std::net::IpAddr) -> String {
+    match host {
+        std::net::IpAddr::V4(address) => address.to_string(),
+        std::net::IpAddr::V6(address) => format!("[{address}]"),
+    }
+}
 
 pub async fn proxy_model_request(
     State(state): State<Arc<AppState>>,
@@ -49,13 +167,13 @@ pub async fn proxy_model_request(
             }
             Ok(None) => {}
             Err(ScanError::Absent) => {
-                return Err(ProxyError::BadRequest("missing \"model\" field".into()))
+                return Err(ProxyError::BadRequest("missing \"model\" field".into()));
             }
             Err(ScanError::ModelNotString) => {
-                return Err(ProxyError::BadRequest("\"model\" must be a string".into()))
+                return Err(ProxyError::BadRequest("\"model\" must be a string".into()));
             }
             Err(ScanError::Malformed) => {
-                return Err(ProxyError::BadRequest("invalid JSON request body".into()))
+                return Err(ProxyError::BadRequest("invalid JSON request body".into()));
             }
         }
 
@@ -87,23 +205,15 @@ pub async fn proxy_model_request(
     .await
 }
 
-pub async fn list_models(
-    State(state): State<Arc<AppState>>,
-) -> axum::Json<serde_json::Value> {
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        state.discover_models(),
-    )
-    .await;
+pub async fn list_models(State(state): State<Arc<AppState>>) -> axum::Json<serde_json::Value> {
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), state.discover_models()).await;
 
     let model_map = state.model_map.load();
     // Each model object is served exactly as its backend reported it, so
     // backend-specific metadata (llama.cpp's `meta.n_ctx`, vLLM/sglang's
     // `max_model_len`, ...) reaches clients unchanged.
-    let models: Vec<serde_json::Value> = model_map
-        .values()
-        .map(|entry| entry.info.clone())
-        .collect();
+    let models: Vec<serde_json::Value> =
+        model_map.values().map(|entry| entry.info.clone()).collect();
 
     let mut body = serde_json::json!({
         "object": "list",
@@ -172,7 +282,12 @@ pub async fn get_props(
                 }
             }
         }
-        None => Arc::clone(&state.gpu_sets[0]),
+        None => {
+            let gpu_sets = state.gpu_sets.load();
+            gpu_sets.first().cloned().ok_or_else(|| {
+                ProxyError::BackendUnavailable("no backends are configured".into())
+            })?
+        }
     };
 
     let server = pick_server(&gpu_set).clone();

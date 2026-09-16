@@ -1,14 +1,18 @@
 use arc_swap::ArcSwap;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicUsize;
+use std::net::IpAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Semaphore;
+use std::sync::atomic::AtomicUsize;
+use tokio::sync::{Mutex, Semaphore};
 
 use crate::config::{Config, ServerEntry};
 
 pub struct GpuSet {
     pub name: String,
     pub servers: Vec<ServerEntry>,
+    pub models_path: String,
     pub semaphore: Arc<Semaphore>,
     pub next_server: AtomicUsize,
 }
@@ -26,13 +30,22 @@ pub struct ModelEntry {
 
 pub struct AppState {
     pub api_tokens: HashSet<String>,
-    pub gpu_sets: Vec<Arc<GpuSet>>,
+    pub gpu_sets: ArcSwap<Vec<Arc<GpuSet>>>,
     pub model_map: ArcSwap<HashMap<String, ModelEntry>>,
     pub http_client: reqwest::Client,
+    pub discovered_hosts_path: PathBuf,
+    registration_lock: Mutex<()>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DiscoveredHost {
+    pub host: IpAddr,
+    pub port: u16,
+    pub api_key: String,
 }
 
 impl AppState {
-    pub fn from_config(config: Config) -> Self {
+    pub fn from_config(config: Config, discovered_hosts_path: PathBuf) -> Self {
         let gpu_sets: Vec<Arc<GpuSet>> = config
             .servers
             .into_iter()
@@ -40,6 +53,7 @@ impl AppState {
                 Arc::new(GpuSet {
                     name,
                     servers,
+                    models_path: "/v1/models".into(),
                     semaphore: Arc::new(Semaphore::new(1)),
                     next_server: AtomicUsize::new(0),
                 })
@@ -48,22 +62,26 @@ impl AppState {
 
         Self {
             api_tokens: config.api_tokens.into_iter().collect(),
-            gpu_sets,
+            gpu_sets: ArcSwap::new(Arc::new(gpu_sets)),
             model_map: ArcSwap::new(Arc::new(HashMap::new())),
             http_client: reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(5))
                 .build()
                 .unwrap(),
+            discovered_hosts_path,
+            registration_lock: Mutex::new(()),
         }
     }
 
     pub async fn discover_models(&self) {
         let mut new_map: HashMap<String, ModelEntry> = HashMap::new();
 
-        for gpu_set in &self.gpu_sets {
+        let gpu_sets = self.gpu_sets.load_full();
+        for gpu_set in gpu_sets.iter() {
             let url = format!(
-                "{}/v1/models",
-                gpu_set.servers[0].url().trim_end_matches('/')
+                "{}{}",
+                gpu_set.servers[0].url().trim_end_matches('/'),
+                gpu_set.models_path,
             );
 
             let mut req = self.http_client.get(&url);
@@ -89,7 +107,30 @@ impl AppState {
 
             let listings = body.get("models").and_then(|m| m.as_array());
 
-            if let Some(data) = body.get("data").and_then(|d| d.as_array()) {
+            let data = body
+                .get("data")
+                .and_then(|d| d.as_array())
+                .map(Vec::as_slice);
+            let synthesized;
+            let data = if data.is_some() {
+                data
+            } else {
+                synthesized = listings.map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            let id = item
+                                .get("id")
+                                .or_else(|| item.get("model"))
+                                .and_then(|value| value.as_str())?;
+                            Some(serde_json::json!({ "id": id, "object": "model" }))
+                        })
+                        .collect::<Vec<_>>()
+                });
+                synthesized.as_deref()
+            };
+
+            if let Some(data) = data {
                 for model in data {
                     if let Some(id) = model.get("id").and_then(|i| i.as_str()) {
                         let listing = listings.and_then(|l| {
@@ -112,9 +153,58 @@ impl AppState {
             }
         }
 
-        tracing::info!("model map refreshed: {} model(s) across {} GPU set(s)",
-            new_map.len(), self.gpu_sets.len());
+        tracing::info!(
+            "model map refreshed: {} model(s) across {} GPU set(s)",
+            new_map.len(),
+            gpu_sets.len()
+        );
 
         self.model_map.store(Arc::new(new_map));
     }
+
+    pub async fn add_discovered_host(
+        &self,
+        host: DiscoveredHost,
+        base_url: String,
+    ) -> Result<(), std::io::Error> {
+        let _guard = self.registration_lock.lock().await;
+        let mut hosts = self.read_discovered_hosts().await?;
+        hosts.retain(|entry| entry.host != host.host || entry.port != host.port);
+        hosts.push(host.clone());
+
+        let json = serde_json::to_vec_pretty(&hosts)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let temporary_path = self.discovered_hosts_path.with_extension("json.tmp");
+        tokio::fs::write(&temporary_path, json).await?;
+        tokio::fs::rename(&temporary_path, &self.discovered_hosts_path).await?;
+
+        let name = discovered_group_name(host.host, host.port);
+        let mut gpu_sets = self.gpu_sets.load_full().as_ref().clone();
+        gpu_sets.retain(|gpu_set| gpu_set.name != name);
+        gpu_sets.push(Arc::new(GpuSet {
+            name,
+            servers: vec![ServerEntry::WithToken {
+                url: base_url,
+                token: host.api_key,
+            }],
+            models_path: "/models".into(),
+            semaphore: Arc::new(Semaphore::new(1)),
+            next_server: AtomicUsize::new(0),
+        }));
+        self.gpu_sets.store(Arc::new(gpu_sets));
+        Ok(())
+    }
+
+    pub async fn read_discovered_hosts(&self) -> Result<Vec<DiscoveredHost>, std::io::Error> {
+        match tokio::fs::read(&self.discovered_hosts_path).await {
+            Ok(contents) => serde_json::from_slice(&contents)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+fn discovered_group_name(host: IpAddr, port: u16) -> String {
+    format!("discovered-{host}-{port}")
 }

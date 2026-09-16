@@ -54,6 +54,7 @@ If no config path is given, it defaults to `config.toml` in the current director
 - `POST /v1/messages` — proxied to a backend (llama.cpp's Anthropic Messages API)
 - `POST /v1/messages/count_tokens` — proxied to a backend (llama.cpp only)
 - `GET /v1/models` — aggregates models from all backends
+- `POST /register` — discovers and persists a llama.cpp backend (the only unauthenticated route)
 - `GET /health` — liveness check (always `{"status":"ok"}` if the proxy process is up)
 - `GET /props` — mirrors llama.cpp's `/props`; proxied to a backend so clients (e.g. pi-llama-cpp)
   can detect server mode and, with `?model=<id>`, per-model status/capabilities. An unknown model
@@ -69,7 +70,9 @@ that speaks that shape works, including llama.cpp, sglang, and vLLM. Endpoints a
 doesn't implement (e.g. `/v1/rerank` on a plain chat model, or `/v1/messages` on sglang/vLLM) will
 simply return whatever error that backend returns.
 
-All endpoints require `Authorization: Bearer <token>` with a token from your config. If you're
+All endpoints except `POST /register` require `Authorization: Bearer <token>` with a token from your config. Register a llama.cpp node with `{"host":"<node IP>","port":52395,"api_key":"<API_KEY>"}`. The proxy tries HTTPS and then HTTP, verifies `/health` and `/models`, and saves successful registrations beside the config in `discovered_hosts.json` for restoration after restart.
+
+If you're
 pointing an Anthropic SDK client (or Claude Code) at `/v1/messages`, set `ANTHROPIC_AUTH_TOKEN`
 rather than `ANTHROPIC_API_KEY` — the latter sends the key via an `x-api-key` header, which this
 proxy (and llama.cpp's Messages API implementation) does not check.
@@ -91,4 +94,3 @@ RUST_LOG=debug cargo run -- config.toml
 
 An nginx TLS vhost and an opencode plugin that auto-lists every model behind the
 proxy: [examples/README.md](examples/README.md).
-

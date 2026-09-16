@@ -13,12 +13,8 @@ impl IntoResponse for ProxyError {
             ProxyError::BackendUnavailable(msg) => {
                 (StatusCode::BAD_GATEWAY, "backend_unavailable", msg)
             }
-            ProxyError::BadRequest(msg) => {
-                (StatusCode::BAD_REQUEST, "bad_request", msg)
-            }
-            ProxyError::Internal(msg) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", msg)
-            }
+            ProxyError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg),
+            ProxyError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", msg),
         };
 
         let body = serde_json::json!({

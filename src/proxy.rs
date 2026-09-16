@@ -1,9 +1,9 @@
 use bytes::Bytes;
-use futures::future::select_all;
 use futures::Stream;
+use futures::future::select_all;
 use std::pin::Pin;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
 use tokio::sync::OwnedSemaphorePermit;
 
@@ -32,9 +32,9 @@ pub async fn acquire_gpu_set_for_model(
     model: &str,
 ) -> Result<(Arc<GpuSet>, OwnedSemaphorePermit), ProxyError> {
     let map = state.model_map.load();
-    let entry = map.get(model).ok_or_else(|| {
-        ProxyError::BadRequest(format!("model not found: {model}"))
-    })?;
+    let entry = map
+        .get(model)
+        .ok_or_else(|| ProxyError::BadRequest(format!("model not found: {model}")))?;
 
     let futures: Vec<_> = entry
         .gpu_sets
