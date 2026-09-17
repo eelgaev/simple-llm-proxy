@@ -30,12 +30,13 @@ where
 pub async fn acquire_gpu_set_for_model(
     state: &AppState,
     model: &str,
-) -> Result<(Arc<GpuSet>, OwnedSemaphorePermit), ProxyError> {
+) -> Result<(Arc<GpuSet>, OwnedSemaphorePermit, String), ProxyError> {
     let map = state.model_map.load();
     let entry = map
         .get(model)
         .ok_or_else(|| ProxyError::BadRequest(format!("model not found: {model}")))?;
 
+    let backend_id = entry.backend_id.clone();
     let futures: Vec<_> = entry
         .gpu_sets
         .iter()
@@ -52,7 +53,7 @@ pub async fn acquire_gpu_set_for_model(
     drop(map);
 
     let ((gpu_set, permit), _, _) = select_all(futures).await;
-    Ok((gpu_set, permit))
+    Ok((gpu_set, permit, backend_id))
 }
 
 pub fn pick_server(gpu_set: &GpuSet) -> &ServerEntry {

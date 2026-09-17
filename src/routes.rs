@@ -186,8 +186,26 @@ pub async fn proxy_model_request(
 
     let model = model.ok_or_else(|| ProxyError::BadRequest("missing \"model\" field".into()))?;
 
-    let (gpu_set, permit) = acquire_gpu_set_for_model(&state, &model).await?;
+    let model_range = scanner
+        .model_value_range()
+        .expect("a discovered model always has a byte range");
+    let (gpu_set, permit, backend_model) = acquire_gpu_set_for_model(&state, &model).await?;
     tracing::info!(gpu_set = %gpu_set.name, model = %model, "acquired gpu set");
+
+    // Registered hosts are exposed as `host/model`, while their llama.cpp
+    // server still expects the original model id. Rewrite only the already
+    // buffered model string and keep streaming the remainder of the request.
+    if backend_model != model {
+        let encoded = serde_json::to_string(&backend_model)
+            .map_err(|e| ProxyError::Internal(format!("failed to encode model id: {e}")))?;
+        let replacement = &encoded.as_bytes()[1..encoded.len() - 1];
+        let mut rewritten =
+            BytesMut::with_capacity(head.len() - model_range.len() + replacement.len());
+        rewritten.extend_from_slice(&head[..model_range.start]);
+        rewritten.extend_from_slice(replacement);
+        rewritten.extend_from_slice(&head[model_range.end..]);
+        head = rewritten;
+    }
 
     // What we buffered, then the client's stream picked up where it left off.
     let head = head.freeze();
@@ -199,7 +217,11 @@ pub async fn proxy_model_request(
         server,
         &path,
         reqwest::Body::wrap_stream(outgoing),
-        content_length,
+        if backend_model == model {
+            content_length
+        } else {
+            None
+        },
         permit,
     )
     .await

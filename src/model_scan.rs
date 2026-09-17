@@ -48,6 +48,9 @@ pub struct ModelScanner {
     model: String,
     /// Nesting level while skipping a `{...}` or `[...]` value.
     depth: usize,
+    bytes_processed: usize,
+    model_value_start: Option<usize>,
+    model_value_range: Option<std::ops::Range<usize>>,
 }
 
 impl ModelScanner {
@@ -57,7 +60,16 @@ impl ModelScanner {
             key: String::new(),
             model: String::new(),
             depth: 0,
+            bytes_processed: 0,
+            model_value_start: None,
+            model_value_range: None,
         }
+    }
+
+    /// Byte range occupied by the model string's contents (excluding quotes)
+    /// in all chunks fed so far.
+    pub fn model_value_range(&self) -> Option<std::ops::Range<usize>> {
+        self.model_value_range.clone()
     }
 
     /// Feeds the next chunk of the body.
@@ -65,7 +77,8 @@ impl ModelScanner {
     /// Returns `Ok(Some(model))` once the value is complete, `Ok(None)` if more
     /// bytes are needed, and `Err` when the body can't yield one.
     pub fn feed(&mut self, chunk: &[u8]) -> Result<Option<String>, ScanError> {
-        for &b in chunk {
+        for (index, &b) in chunk.iter().enumerate() {
+            let absolute = self.bytes_processed + index;
             match self.state {
                 State::Start => match b {
                     b'{' => self.state = State::KeyStart,
@@ -102,6 +115,7 @@ impl ModelScanner {
                         b if b.is_ascii_whitespace() => {}
                         b'"' if wanted => {
                             self.model.clear();
+                            self.model_value_start = Some(absolute + 1);
                             self.state = State::Model;
                         }
                         _ if wanted => return Err(ScanError::ModelNotString),
@@ -118,7 +132,12 @@ impl ModelScanner {
                 // escapes a model id could plausibly carry and take the rest
                 // literally. Ids are ASCII in practice.
                 State::Model => match b {
-                    b'"' => return Ok(Some(std::mem::take(&mut self.model))),
+                    b'"' => {
+                        self.model_value_range =
+                            self.model_value_start.map(|start| start..absolute);
+                        self.bytes_processed = absolute + 1;
+                        return Ok(Some(std::mem::take(&mut self.model)));
+                    }
                     b'\\' => self.state = State::ModelEscape,
                     _ => self.model.push(b as char),
                 },
@@ -162,6 +181,7 @@ impl ModelScanner {
             }
         }
 
+        self.bytes_processed += chunk.len();
         Ok(None)
     }
 }
@@ -189,7 +209,15 @@ mod tests {
     #[test]
     fn finds_model_first() {
         let body = r#"{"model":"gemma","stream":true}"#;
-        assert_eq!(scan(body).unwrap().as_deref(), Some("gemma"));
+        let mut scanner = ModelScanner::new();
+        assert_eq!(
+            scanner.feed(body.as_bytes()).unwrap().as_deref(),
+            Some("gemma")
+        );
+        assert_eq!(
+            &body.as_bytes()[scanner.model_value_range().unwrap()],
+            b"gemma"
+        );
         assert_eq!(scan_bytewise(body).unwrap().as_deref(), Some("gemma"));
     }
 

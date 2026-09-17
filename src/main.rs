@@ -111,6 +111,21 @@ mod tests {
         .into_response()
     }
 
+    async fn chat(
+        headers: HeaderMap,
+        axum::Json(body): axum::Json<serde_json::Value>,
+    ) -> axum::response::Response {
+        if headers.get("authorization").and_then(|v| v.to_str().ok())
+            != Some("Bearer backend-secret")
+        {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        if body["model"] != "registered-model" {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+        axum::Json(serde_json::json!({"model": body["model"]})).into_response()
+    }
+
     #[tokio::test]
     async fn register_falls_back_to_http_persists_and_adds_provider() {
         let backend = Router::new()
@@ -127,7 +142,8 @@ mod tests {
                 }),
             )
             .route("/models", get(models))
-            .route("/v1/models", get(models));
+            .route("/v1/models", get(models))
+            .route("/v1/chat/completions", post(chat));
         let backend_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let backend_address = backend_listener.local_addr().unwrap();
         let backend_task = tokio::spawn(async move {
@@ -192,8 +208,29 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|model| model["id"] == "registered-model")
+                .any(|model| model["id"] == "127.0.0.1/registered-model")
         );
+        assert!(
+            models["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|model| model["model"] == "127.0.0.1/registered-model")
+        );
+
+        let completion = client
+            .post(format!("http://{proxy_address}/v1/chat/completions"))
+            .bearer_auth("proxy-secret")
+            .json(&serde_json::json!({
+                "model": "127.0.0.1/registered-model",
+                "messages": []
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(completion.status(), StatusCode::OK);
+        let completion: serde_json::Value = completion.json().await.unwrap();
+        assert_eq!(completion["model"], "registered-model");
 
         let unauthenticated = client
             .get(format!("http://{proxy_address}/v1/models"))

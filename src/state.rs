@@ -18,6 +18,9 @@ pub struct GpuSet {
     /// Dynamically registered nodes are commonly addressed by IP and use a
     /// locally issued/self-signed certificate.
     pub trust_invalid_tls: bool,
+    /// Prefix applied to model ids exposed by dynamically registered hosts.
+    /// The backend still receives its original, unprefixed id.
+    pub model_prefix: Option<String>,
 }
 
 pub struct ModelEntry {
@@ -29,6 +32,8 @@ pub struct ModelEntry {
     /// The matching entry from llama.cpp's second top-level block, `models[]`
     /// (the Ollama-style listing). `None` for backends that don't emit one.
     pub listing: Option<serde_json::Value>,
+    /// Model id understood by the selected backend.
+    pub backend_id: String,
 }
 
 pub struct AppState {
@@ -61,6 +66,7 @@ impl AppState {
                     semaphore: Arc::new(Semaphore::new(1)),
                     next_server: AtomicUsize::new(0),
                     trust_invalid_tls: false,
+                    model_prefix: None,
                 })
             })
             .collect();
@@ -143,17 +149,28 @@ impl AppState {
             if let Some(data) = data {
                 for model in data {
                     if let Some(id) = model.get("id").and_then(|i| i.as_str()) {
-                        let listing = listings.and_then(|l| {
+                        let exposed_id = gpu_set
+                            .model_prefix
+                            .as_ref()
+                            .map(|prefix| format!("{prefix}/{id}"))
+                            .unwrap_or_else(|| id.to_string());
+                        let mut info = model.clone();
+                        info["id"] = serde_json::Value::String(exposed_id.clone());
+                        let mut listing = listings.and_then(|l| {
                             l.iter()
                                 .find(|m| m.get("model").and_then(|n| n.as_str()) == Some(id))
                                 .cloned()
                         });
+                        if let Some(listing) = listing.as_mut() {
+                            listing["model"] = serde_json::Value::String(exposed_id.clone());
+                        }
                         new_map
-                            .entry(id.to_string())
+                            .entry(exposed_id)
                             .or_insert_with(|| ModelEntry {
                                 gpu_sets: Vec::new(),
-                                info: model.clone(),
+                                info,
                                 listing,
+                                backend_id: id.to_string(),
                             })
                             .gpu_sets
                             .push(Arc::clone(gpu_set));
@@ -201,6 +218,7 @@ impl AppState {
             semaphore: Arc::new(Semaphore::new(1)),
             next_server: AtomicUsize::new(0),
             trust_invalid_tls: true,
+            model_prefix: Some(host.host.to_string()),
         }));
         self.gpu_sets.store(Arc::new(gpu_sets));
         Ok(())
