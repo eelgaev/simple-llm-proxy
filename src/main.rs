@@ -105,8 +105,12 @@ mod tests {
             return StatusCode::UNAUTHORIZED.into_response();
         }
         axum::Json(serde_json::json!({
-            "data": [{"id": "registered-model", "object": "model"}],
-            "models": [{"model": "registered-model"}]
+            "data": [{
+                "aliases": ["registered-model", "registered-alias"],
+                "id": "registered-model",
+                "object": "model"
+            }],
+            "models": [{"model": "registered-model", "name": "registered-model"}]
         }))
         .into_response()
     }
@@ -210,6 +214,11 @@ mod tests {
                 .iter()
                 .any(|model| model["id"] == "127.0.0.1/registered-model")
         );
+        let info = &models["data"][0];
+        assert_eq!(
+            info["aliases"],
+            serde_json::json!(["127.0.0.1/registered-model", "127.0.0.1/registered-alias"])
+        );
         assert!(
             models["models"]
                 .as_array()
@@ -217,6 +226,7 @@ mod tests {
                 .iter()
                 .any(|model| model["model"] == "127.0.0.1/registered-model")
         );
+        assert_eq!(models["models"][0]["name"], "127.0.0.1/registered-model");
 
         let completion = client
             .post(format!("http://{proxy_address}/v1/chat/completions"))

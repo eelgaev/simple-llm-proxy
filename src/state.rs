@@ -156,6 +156,16 @@ impl AppState {
                             .unwrap_or_else(|| id.to_string());
                         let mut info = model.clone();
                         info["id"] = serde_json::Value::String(exposed_id.clone());
+                        if let Some(prefix) = gpu_set.model_prefix.as_deref()
+                            && let Some(aliases) =
+                                info.get_mut("aliases").and_then(|v| v.as_array_mut())
+                        {
+                            for alias in aliases {
+                                if let Some(value) = alias.as_str() {
+                                    *alias = serde_json::Value::String(format!("{prefix}/{value}"));
+                                }
+                            }
+                        }
                         let mut listing = listings.and_then(|l| {
                             l.iter()
                                 .find(|m| m.get("model").and_then(|n| n.as_str()) == Some(id))
@@ -163,6 +173,12 @@ impl AppState {
                         });
                         if let Some(listing) = listing.as_mut() {
                             listing["model"] = serde_json::Value::String(exposed_id.clone());
+                            if let Some(prefix) = gpu_set.model_prefix.as_deref()
+                                && let Some(name) = listing.get_mut("name")
+                                && let Some(value) = name.as_str()
+                            {
+                                *name = serde_json::Value::String(format!("{prefix}/{value}"));
+                            }
                         }
                         new_map
                             .entry(exposed_id)
