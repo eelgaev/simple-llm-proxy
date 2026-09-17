@@ -27,7 +27,7 @@ pub async fn register(
 
     for scheme in ["https", "http"] {
         let base_url = format!("{scheme}://{}:{}", format_host(host.host), host.port);
-        match inspect_llama_server(&state.http_client, &base_url, &host.api_key).await {
+        match inspect_llama_server(&state.registered_host_client, &base_url, &host.api_key).await {
             Ok(model_count) => {
                 selected = Some((base_url, model_count));
                 break;
@@ -72,7 +72,7 @@ pub async fn restore_discovered_hosts(state: &Arc<AppState>) {
         let mut restored = false;
         for scheme in ["https", "http"] {
             let base_url = format!("{scheme}://{}:{}", format_host(host.host), host.port);
-            if inspect_llama_server(&state.http_client, &base_url, &host.api_key)
+            if inspect_llama_server(&state.registered_host_client, &base_url, &host.api_key)
                 .await
                 .is_ok()
             {
@@ -195,7 +195,7 @@ pub async fn proxy_model_request(
 
     let server = pick_server(&gpu_set);
     forward_request(
-        &state.http_client,
+        state.client_for(&gpu_set),
         server,
         &path,
         reqwest::Body::wrap_stream(outgoing),
@@ -291,5 +291,5 @@ pub async fn get_props(
     };
 
     let server = pick_server(&gpu_set).clone();
-    forward_get(&state.http_client, &server, &path).await
+    forward_get(state.client_for(&gpu_set), &server, &path).await
 }

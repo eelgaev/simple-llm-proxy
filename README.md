@@ -70,7 +70,7 @@ that speaks that shape works, including llama.cpp, sglang, and vLLM. Endpoints a
 doesn't implement (e.g. `/v1/rerank` on a plain chat model, or `/v1/messages` on sglang/vLLM) will
 simply return whatever error that backend returns.
 
-All endpoints except `POST /register` require `Authorization: Bearer <token>` with a token from your config. Register a llama.cpp node with `{"host":"<node IP>","port":52395,"api_key":"<API_KEY>"}`. The proxy tries HTTPS and then HTTP, verifies `/health` and `/models`, and saves successful registrations beside the config in `discovered_hosts.json` for restoration after restart.
+All endpoints except `POST /register` require `Authorization: Bearer <token>` with a token from your config. Register a llama.cpp node with `{"host":"<node IP>","port":52395,"api_key":"<API_KEY>"}`. The proxy tries HTTPS and then HTTP, verifies `/health` and `/models`, and saves successful registrations beside the config in `discovered_hosts.json` for restoration after restart. HTTPS certificates from dynamically registered nodes are trusted without validation so nodes using self-signed certificates work by default; statically configured backends still use normal certificate verification.
 
 If you're
 pointing an Anthropic SDK client (or Claude Code) at `/v1/messages`, set `ANTHROPIC_AUTH_TOKEN`

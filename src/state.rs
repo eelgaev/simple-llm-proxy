@@ -15,6 +15,9 @@ pub struct GpuSet {
     pub models_path: String,
     pub semaphore: Arc<Semaphore>,
     pub next_server: AtomicUsize,
+    /// Dynamically registered nodes are commonly addressed by IP and use a
+    /// locally issued/self-signed certificate.
+    pub trust_invalid_tls: bool,
 }
 
 pub struct ModelEntry {
@@ -33,6 +36,7 @@ pub struct AppState {
     pub gpu_sets: ArcSwap<Vec<Arc<GpuSet>>>,
     pub model_map: ArcSwap<HashMap<String, ModelEntry>>,
     pub http_client: reqwest::Client,
+    pub registered_host_client: reqwest::Client,
     pub discovered_hosts_path: PathBuf,
     registration_lock: Mutex<()>,
 }
@@ -56,6 +60,7 @@ impl AppState {
                     models_path: "/v1/models".into(),
                     semaphore: Arc::new(Semaphore::new(1)),
                     next_server: AtomicUsize::new(0),
+                    trust_invalid_tls: false,
                 })
             })
             .collect();
@@ -66,6 +71,11 @@ impl AppState {
             model_map: ArcSwap::new(Arc::new(HashMap::new())),
             http_client: reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            registered_host_client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .danger_accept_invalid_certs(true)
                 .build()
                 .unwrap(),
             discovered_hosts_path,
@@ -84,7 +94,7 @@ impl AppState {
                 gpu_set.models_path,
             );
 
-            let mut req = self.http_client.get(&url);
+            let mut req = self.client_for(gpu_set).get(&url);
             if let Some(token) = gpu_set.servers[0].token() {
                 req = req.bearer_auth(token);
             }
@@ -190,6 +200,7 @@ impl AppState {
             models_path: "/models".into(),
             semaphore: Arc::new(Semaphore::new(1)),
             next_server: AtomicUsize::new(0),
+            trust_invalid_tls: true,
         }));
         self.gpu_sets.store(Arc::new(gpu_sets));
         Ok(())
@@ -201,6 +212,14 @@ impl AppState {
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(e) => Err(e),
+        }
+    }
+
+    pub fn client_for(&self, gpu_set: &GpuSet) -> &reqwest::Client {
+        if gpu_set.trust_invalid_tls {
+            &self.registered_host_client
+        } else {
+            &self.http_client
         }
     }
 }
