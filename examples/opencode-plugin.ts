@@ -1,11 +1,9 @@
 /**
  * opencode plugin: list every model behind simple-llm-proxy automatically.
  *
- * opencode has no built-in discovery for OpenAI-compatible providers — its docs
- * have you hand-write each model id under `provider.<id>.models` in
- * opencode.json. This plugin fills that map at startup from the proxy's
- * `GET /v1/models` instead, so adding or swapping a backend model shows up in
- * opencode without editing config.
+ * OpenCode 2 has no built-in discovery for this OpenAI-compatible proxy. This
+ * plugin registers a provider and its models from the proxy's GET /v1/models
+ * when OpenCode loads it.
  *
  * Context limits come from what the backend reports: llama.cpp's `meta.n_ctx`,
  * or `max_model_len` for vLLM/sglang. Image input is taken from llama.cpp's
@@ -19,7 +17,7 @@
  *   LLM_PROXY_ID        provider id shown in opencode (default "llm-proxy")
  *   LLM_PROXY_NAME      display name                  (default: the proxy's host)
  */
-import type { Plugin } from "@opencode-ai/plugin"
+import { Model, Plugin, Provider } from "@opencode/plugin"
 
 const BASE_URL = (process.env["LLM_PROXY_URL"] ?? "http://127.0.0.1:8000").replace(/\/+$/, "")
 const TOKEN = process.env["LLM_PROXY_TOKEN"] ?? ""
@@ -48,7 +46,7 @@ type ProxyModel = {
 
 type ProxyListing = { model?: string; capabilities?: string[] }
 
-export async function discoverModels(): Promise<Record<string, unknown> | undefined> {
+async function discoverModels(providerID: ReturnType<typeof Provider.ID.make>): Promise<Model.Info[]> {
   const response = await fetch(`${BASE_URL}/v1/models`, {
     headers: TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {},
     signal: AbortSignal.timeout(TIMEOUT_MS),
@@ -56,46 +54,51 @@ export async function discoverModels(): Promise<Record<string, unknown> | undefi
   if (!response.ok) throw new Error(`${BASE_URL}/v1/models returned ${response.status}`)
 
   const body = (await response.json()) as { data?: ProxyModel[]; models?: ProxyListing[] }
-  if (!body.data?.length) return undefined
+  if (!body.data?.length) return []
 
   // llama.cpp reports capabilities in its second top-level block, keyed by name.
   const listings = new Map((body.models ?? []).map((entry) => [entry.model, entry]))
 
-  const models: Record<string, unknown> = {}
+  const models: Model.Info[] = []
   for (const model of body.data) {
     // n_ctx is what the model is actually served at; n_ctx_train is only what it
     // was trained for, so never fall back to it — that would overstate the limit.
-    const context = model.meta?.n_ctx ?? model.max_model_len
+    const reportedContext = model.meta?.n_ctx ?? model.max_model_len
+    const context =
+      typeof reportedContext === "number" && Number.isSafeInteger(reportedContext) && reportedContext > 0
+        ? reportedContext
+        : undefined
     const multimodal = listings.get(model.id)?.capabilities?.includes("multimodal") ?? false
 
-    // These are the flat keys opencode's provider loader actually reads
-    // (`model.attachment`, `model.tool_call`, `model.modalities`, ...). A
-    // nested `capabilities: {...}` object is silently ignored.
-    models[model.id] = {
+    const modelID = Model.ID.make(model.id)
+    const defaults = Model.Info.default(providerID, modelID)
+    models.push({
+      ...defaults,
       name: model.aliases?.[0] ?? model.id,
-      temperature: true,
-      tool_call: true,
-      attachment: multimodal,
-      modalities: {
+      capabilities: {
+        ...defaults.capabilities,
+        tools: true,
         input: multimodal ? ["text", "image"] : ["text"],
         output: ["text"],
       },
-      // Leave the limit off entirely when the backend didn't say, rather than
-      // inventing a number opencode would then budget against.
-      ...(context
-        ? { limit: { context, output: Math.min(32768, Math.floor(context / 4)) } }
-        : {}),
-    }
+      // Model.Info.default assumes 200k context. Zero means unknown when the
+      // backend doesn't report a served context window.
+      limit: context
+        ? { ...defaults.limit, context, output: Math.min(32768, Math.max(1, Math.floor(context / 4))) }
+        : { ...defaults.limit, context: 0 },
+    })
   }
 
   return models
 }
 
-export const LlmProxyModels: Plugin = async () => ({
-  async config(input) {
-    let models: Record<string, unknown> | undefined
+export default Plugin.define({
+  id: "llm-proxy.models",
+  async setup(ctx) {
+    const providerID = Provider.ID.make(PROVIDER_ID)
+    let models: Model.Info[]
     try {
-      models = await discoverModels()
+      models = await discoverModels(providerID)
     } catch (error) {
       // A proxy that's down must not stop opencode from starting. One line, no
       // stack — this prints above the model list on every invocation.
@@ -103,27 +106,34 @@ export const LlmProxyModels: Plugin = async () => ({
       console.error(`[${PROVIDER_ID}] model discovery failed: ${reason}`)
       return
     }
-    if (!models) return
+    if (!models.length) return
 
-    // The config shape here is the one the provider loader reads (npm/options/
-    // models); it isn't in every published version of the Config type, so this
-    // stays loosely typed on purpose.
-    const config = input as any
-    const providers = (config.provider ??= {})
-    const existing = providers[PROVIDER_ID] ?? {}
+    await ctx.provider.transform((editor) => {
+      const existing = editor.get(PROVIDER_ID)
+      const settings = { baseURL: `${BASE_URL}/v1`, ...(TOKEN ? { apiKey: TOKEN } : {}) }
+      if (!existing) {
+        editor.add({
+          info: {
+            ...Provider.Info.empty(providerID),
+            name: PROVIDER_NAME,
+            activation: "enabled",
+            package: "@opencode/ai/providers/openai-compatible",
+            settings,
+          },
+          models,
+        })
+        return
+      }
 
-    providers[PROVIDER_ID] = {
-      npm: "@ai-sdk/openai-compatible",
-      name: PROVIDER_NAME,
-      ...existing,
-      options: {
-        baseURL: `${BASE_URL}/v1`,
-        ...(TOKEN ? { apiKey: TOKEN } : {}),
-        ...existing.options,
-      },
-      // Anything hand-written in opencode.json wins over discovery, so you can
-      // still pin a cost or a smaller context for one model.
-      models: { ...models, ...existing.models },
-    }
+      // Keep provider settings and model definitions from opencode.json(c).
+      editor.update(PROVIDER_ID, (provider) => {
+        provider.package ||= "@opencode/ai/providers/openai-compatible"
+        provider.settings = { ...settings, ...provider.settings }
+      })
+      editor.models.set(PROVIDER_ID, [
+        ...models.filter((model) => !existing.models.has(model.id)),
+        ...existing.models.values(),
+      ])
+    })
   },
 })

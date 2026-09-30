@@ -27,17 +27,20 @@ unbuffered request bodies need HTTP/1.1 upstream.
 `client_max_body_size` is the binding limit on multimodal payloads; the proxy
 itself doesn't cap body size.
 
-## `opencode-plugin.ts` — auto-list every model in opencode
+## `opencode-plugin.ts` — auto-list every model in OpenCode 2
 
-[opencode](https://opencode.ai) has no discovery for OpenAI-compatible providers —
-its docs have you hand-write each model id under `provider.<id>.models`. This plugin
-fills that map from `GET /v1/models` at startup, so a model added or swapped on a
-backend shows up without editing config.
+[OpenCode 2](https://opencode.ai/v2/docs/build/plugins/) has no discovery for this
+OpenAI-compatible proxy. This plugin registers a provider and its models from
+`GET /v1/models` when OpenCode loads it, so a model added or swapped on a backend
+shows up without editing config.
 
 ```sh
+mkdir -p ~/.config/opencode/plugins
+npm install --prefix ~/.config/opencode --ignore-scripts @opencode/plugin@2
 cp examples/opencode-plugin.ts ~/.config/opencode/plugins/llm-proxy-models.ts
 export LLM_PROXY_URL=https://llm.example.com
-export LLM_PROXY_TOKEN=<a token from config.toml api_tokens>
+export LLM_PROXY_TOKEN='your-api-token' # from config.toml api_tokens
+opencode service restart # refresh a background service that loaded an older plugin
 opencode models        # models appear under llm-proxy/...
 ```
 
@@ -49,23 +52,25 @@ opencode models        # models appear under llm-proxy/...
 | `LLM_PROXY_NAME` | the proxy's host | display name in the model picker |
 
 Use `.opencode/plugins/` instead of `~/.config/opencode/plugins/` to scope it to one
-project.
+project. In that case, install `@opencode/plugin@2` under `.opencode/` as well.
 
 What each model gets, from what the backend reported:
 
 - **context limit** — llama.cpp's `meta.n_ctx`, or `max_model_len` for vLLM/sglang.
-  Omitted entirely when neither is present, rather than guessing a number opencode
-  would then budget against. `n_ctx_train` is deliberately never used — it's the
-  trained context, not what the model is being served at.
+  Set to `0` (unknown) when neither is present, since OpenCode 2's model default
+  would otherwise claim a 200k context window. OpenCode cannot budget context
+  accurately for those models. `n_ctx_train` is deliberately never used — it's
+  the trained context, not what the model is being served at.
 - **image input** — from `multimodal` in llama.cpp's `models[].capabilities`.
-- **output limit** — `min(32768, context / 4)`, since no backend reports a
-  generation cap.
+- **output limit** — `min(32768, context / 4)` when context is known; otherwise
+  OpenCode's default, since no backend reports a generation cap.
 - **tool calling** — asserted for every model; the proxy has no way to know which
   backends actually support it.
 
-Anything you write by hand in `opencode.json` wins over discovery, so you can pin a
-cost or a smaller context for one model. If the proxy is unreachable the plugin logs
-one line and leaves the config alone rather than blocking startup.
+Anything you write by hand under `providers.llm-proxy` in `opencode.json(c)` wins
+over discovery, so you can pin a cost or a smaller context for one model. If the
+proxy is unreachable the plugin logs one line and leaves providers alone rather
+than blocking startup.
 
 ### If models don't show up
 
@@ -77,6 +82,7 @@ The error line tells you which failure it is:
   never reach it.
 - `model discovery failed: Unable to connect` — wrong `LLM_PROXY_URL`, or the proxy
   is down.
-- **no line at all** — the plugin was never loaded. Check the filename ends in `.ts`
-  and that opencode isn't running with `--pure` (which skips external plugins) or
-  pointing `OPENCODE_CONFIG_DIR` at a different directory.
+- **no line at all** — check that `opencode plugin list` shows `llm-proxy.models`,
+  that `@opencode/plugin@2` is installed beside the plugin, that the filename ends
+  in `.ts`, and that OpenCode is using the expected config directory. If the
+  background service cached a failed import, run `opencode service restart`.

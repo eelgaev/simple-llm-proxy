@@ -92,5 +92,5 @@ RUST_LOG=debug cargo run -- config.toml
 
 ## Examples
 
-An nginx TLS vhost and an opencode plugin that auto-lists every model behind the
+An nginx TLS vhost and an OpenCode 2 plugin that auto-lists every model behind the
 proxy: [examples/README.md](examples/README.md).
